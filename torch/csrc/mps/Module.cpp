@@ -13,6 +13,7 @@
 #include <memory>
 
 #ifdef USE_MPS
+#include <ATen/mps/MPSBulkLoad.h>
 #include <ATen/mps/MPSProfiler.h>
 #include <ATen/native/mps/MetalShaderLibrary.h>
 #endif
@@ -514,6 +515,22 @@ void initModule(PyObject* module) {
   m.def("_mps_get_core_count", []() {
     return at::mps::MPSDevice::getInstance()->getCoreCount();
   });
+
+  // Bulk safetensors loading with parallel I/O
+  m.def(
+      "_mps_load_safetensors",
+      [](const std::string& filename) {
+        auto result = at::mps::mps_load_safetensors(filename);
+
+        // Convert std::unordered_map to Python dict
+        py::dict py_result;
+        for (auto& [name, tensor] : result) {
+          py_result[py::str(name)] =
+              torch::autograd::make_variable(tensor, false);
+        }
+        return py_result;
+      },
+      py::arg("filename"));
 }
 #endif /* USE_MPS */
 
