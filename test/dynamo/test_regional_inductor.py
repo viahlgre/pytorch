@@ -1605,6 +1605,84 @@ class RegionalInductorPartitionTests(torch._inductor.test_case.TestCase):
         gm = torch.fx.GraphModule(torch.nn.Module(), g)
         self.assertEqual(self._scoop_and_count(gm), 2)
 
+    def test_graphmodule_get_attr_merges_partitions(self):
+        """Two tagged runs separated by untagged nodes must be merged into
+        one partition when a get_attr node in the first run references a
+        GraphModule consumed by a node in the second run.
+
+        This mirrors the flex_attention_backward pattern where:
+          Run 1: [tagged get_attr (GraphModule subgraph)]
+          Gap:   [untagged recompute nodes]
+          Run 2: [tagged HOP consuming the GraphModule]
+
+        Without merging, the GraphModule becomes a placeholder input to
+        Run 2's scooped submodule, and standalone_compile fails because
+        make_fx cannot trace a GraphModule argument.
+        """
+        inner_g = torch.fx.Graph()
+        inner_x = inner_g.placeholder("x")
+        inner_out = inner_g.call_function(torch.ops.aten.sin.default, (inner_x,))
+        inner_out.meta["val"] = torch.empty(10)
+        inner_g.output(inner_out)
+        inner_gm = torch.fx.GraphModule(torch.nn.Module(), inner_g)
+
+        g = torch.fx.Graph()
+        x = g.placeholder("x")
+
+        # Run 1: tagged get_attr referencing a GraphModule
+        get_attr_node = g.get_attr("subgraph_fn")
+        get_attr_node.meta["custom"] = {"compile_with_inductor": True}
+        get_attr_node.meta["val"] = inner_gm
+
+        # Gap: untagged node (mimics recompute ops between runs)
+        gap = g.call_function(torch.ops.aten.sin.default, (x,))
+        gap.meta["val"] = torch.empty(10)
+
+        # Run 2: tagged HOP consuming both gap and the get_attr GraphModule.
+        consumer = g.call_function(
+            torch.ops.higher_order.invoke_subgraph,
+            (get_attr_node, "subgraph_id", gap),
+        )
+        consumer.meta["custom"] = {"compile_with_inductor": True}
+        consumer.meta["val"] = torch.empty(10)
+
+        g.output(consumer)
+
+        parent_module = torch.nn.Module()
+        parent_module.subgraph_fn = inner_gm
+        gm = torch.fx.GraphModule(parent_module, g)
+
+        # GraphModule get_attr: partitions are merged (1 partition)
+        self.assertEqual(self._scoop_and_count(gm), 1)
+
+    def test_non_graphmodule_get_attr_does_not_merge(self):
+        """A get_attr referencing a plain tensor (not a GraphModule) should
+        NOT trigger partition merging — only GraphModule attrs need merging.
+        """
+        g = torch.fx.Graph()
+        x = g.placeholder("x")
+
+        get_attr_node = g.get_attr("weight")
+        get_attr_node.meta["custom"] = {"compile_with_inductor": True}
+        get_attr_node.meta["val"] = torch.empty(10)
+
+        gap = g.call_function(torch.ops.aten.sin.default, (x,))
+        gap.meta["val"] = torch.empty(10)
+
+        consumer = g.call_function(torch.ops.aten.mul.Scalar, (gap, 1.0))
+        consumer.meta["custom"] = {"compile_with_inductor": True}
+        consumer.meta["val"] = torch.empty(10)
+        consumer.args = (gap, get_attr_node)
+
+        g.output(consumer)
+
+        parent_module = torch.nn.Module()
+        parent_module.weight = torch.nn.Parameter(torch.randn(10))
+        gm = torch.fx.GraphModule(parent_module, g)
+
+        # Plain tensor get_attr: partitions stay separate (2 partitions)
+        self.assertEqual(self._scoop_and_count(gm), 2)
+
 
 if __name__ == "__main__":
     run_tests()

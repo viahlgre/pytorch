@@ -114,6 +114,59 @@ class _RegionScooper:
     """
 
     @staticmethod
+    def _find_gm_cross_partitions(gm, partitions, node_to_part):
+        """Return ``(src, dst)`` partition-index pairs that must be merged.
+
+        A merge is required when a ``get_attr`` node in partition *src*
+        references a ``GraphModule`` attribute and is consumed by a node in
+        partition *dst*.  Without merging the ``GraphModule`` would become a
+        placeholder input and ``standalone_compile`` would fail because
+        ``make_fx`` cannot trace a ``GraphModule`` argument.
+        """
+        edges: set[tuple[int, int]] = set()
+        for i, partition in enumerate(partitions):
+            for node in partition:
+                for inp in node.all_input_nodes:
+                    if inp.op != "get_attr" or inp not in node_to_part:
+                        continue
+                    j = node_to_part[inp]
+                    if j != i and isinstance(
+                        getattr(gm, inp.target, None), torch.fx.GraphModule
+                    ):
+                        edges.add((j, i))
+        return edges
+
+    @staticmethod
+    def _merge_partitions_with_gm_deps(gm, partitions):
+        """Merge partitions connected by ``get_attr`` to ``GraphModule`` edges.
+
+        When contiguous-run partitioning splits annotated regions, a
+        ``get_attr`` referencing a ``GraphModule`` may land in one partition
+        while the HOP that consumes it lands in another. Merging keeps the
+        ``get_attr`` inside the scooped submodule so the ``GraphModule`` is
+        accessed as a module attribute, not a function argument.
+        """
+        if len(partitions) <= 1:
+            return partitions
+
+        node_to_part: dict[torch.fx.Node, int] = {}
+        for i, p in enumerate(partitions):
+            for n in p:
+                node_to_part[n] = i
+
+        edges = _RegionScooper._find_gm_cross_partitions(gm, partitions, node_to_part)
+        if not edges:
+            return partitions
+
+        # For each edge (src, dst), merge src into dst.
+        merged: set[int] = set()
+        for src, dst in edges:
+            partitions[dst].update(partitions[src])
+            merged.add(src)
+
+        return [p for i, p in enumerate(partitions) if i not in merged]
+
+    @staticmethod
     def scoop_regions(gm):
         from torch.fx.passes.utils.fuser_utils import fuse_by_partitions
 
@@ -134,6 +187,8 @@ class _RegionScooper:
         if not partitions:
             logger.info("No inductor marked nodes found")
             return gm
+
+        partitions = _RegionScooper._merge_partitions_with_gm_deps(gm, partitions)
 
         return fuse_by_partitions(
             gm,
