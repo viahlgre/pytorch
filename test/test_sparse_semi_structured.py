@@ -1322,6 +1322,19 @@ class TestSparseSemiStructuredCUSPARSELT(TestCase):
         self.assertNotEqual(A_sparse.packed.data_ptr, A_clone.packed.data_ptr)
         self.assertEqual(A_sparse.packed, A_clone.packed)
 
+    @unittest.skipIf(TEST_WITH_ROCM, "Not supported on ROCm")
+    def test_cslt_sparse_tensor_with_alg_id(self, device):
+        A = rand_sparse_semi_structured_mask(256, 128, dtype=torch.float16)
+        A_compressed = torch._cslt_compress(A)
+        B = torch.ones((128, 128), device=device).to(torch.float16)
+        alg_id = torch._cslt_sparse_mm_search(A_compressed, B.t())
+        A_sparse = to_sparse_semi_structured(A, alg_id=alg_id)
+        self.assertEqual(A_sparse.alg_id_cusparselt, alg_id)
+        dense_result = torch.mm(A, B).to(torch.float16)
+        sparse_result = torch.mm(A_sparse, B).to(torch.float16)
+        torch.testing.assert_close(sparse_result, dense_result, rtol=1e-3, atol=1e-3)
+
+
 if len(SEMI_STRUCTURED_SUPPORTED_BACKENDS) > 0:
     instantiate_device_type_tests(TestSparseSemiStructured, globals(), only_for="cuda")
 if "cutlass" in SEMI_STRUCTURED_SUPPORTED_BACKENDS:
