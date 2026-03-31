@@ -15,13 +15,17 @@ static constexpr int64_t kChunkSize = 65536;
 static constexpr int64_t kBlockSize = 512;
 
 // TODO(crcrpar): Add `n>5` for `low prec params & their higher prec copy`
-// TensorListMetadata has to be < 4KB - the limit for kernel launch argument
-static constexpr int depth_to_max_tensors[5] = {110, 64, 48, 36, 30};
-static constexpr int depth_to_max_blocks[5] = {320, 320, 320, 320, 320};
-static constexpr int depth_to_max_tensors_scalarlist[5] = {96, 64, 48, 36, 30};
+// TensorListMetadata has to be < 32KB - the kernel launch argument limit
+// since CUDA 12.1 (PyTorch requires CUDA 12.0+).
+// Values from https://github.com/pytorch/pytorch/pull/134373.
+// TODO: these can likely be tuned more optimally.
+static constexpr int depth_to_max_tensors[5] = {770, 448, 336, 252, 210};
+static constexpr int depth_to_max_blocks[5] = {2240, 2240, 2240, 2240, 2240};
+static constexpr int depth_to_max_tensors_scalarlist[5] =
+    {672, 448, 336, 252, 210};
 static constexpr int depth_to_max_tensors_scalarlist_of_complex_double[2] = {
-    72,
-    60};
+    504,
+    420};
 
 template <typename T>
 __device__ __forceinline__ bool is_aligned(T* p) {
@@ -42,7 +46,7 @@ template <int n>
 struct TensorListMetadata {
   const void* addresses[n][depth_to_max_tensors[n - 1]];
   int64_t numel_for_tensor[depth_to_max_tensors[n - 1]];
-  unsigned char block_to_tensor[depth_to_max_blocks[n - 1]];
+  uint16_t block_to_tensor[depth_to_max_blocks[n - 1]];
   int block_to_chunk[depth_to_max_blocks[n - 1]];
   int start_tensor_this_launch;
 };
@@ -52,12 +56,12 @@ struct TensorListScalarListMetadata {
   const void* addresses[n][depth_to_max_tensors_scalarlist[n - 1]];
   int64_t numel_for_tensor[depth_to_max_tensors_scalarlist[n - 1]];
   scalar_vals_t scalar_vals[depth_to_max_tensors_scalarlist[n - 1]];
-  unsigned char block_to_tensor[depth_to_max_blocks[n - 1]];
+  uint16_t block_to_tensor[depth_to_max_blocks[n - 1]];
   int block_to_chunk[depth_to_max_blocks[n - 1]];
 };
 
 // note(mkozuki): `n` of 1&2 violate the limit of cuda kernel argument size of
-// 4kb with `c10::complex<double>`
+// 32KB with `c10::complex<double>`
 template <>
 struct TensorListScalarListMetadata<c10::complex<double>, 1> {
   const void* addresses[1]
@@ -66,7 +70,7 @@ struct TensorListScalarListMetadata<c10::complex<double>, 1> {
       numel_for_tensor[depth_to_max_tensors_scalarlist_of_complex_double[0]];
   c10::complex<double>
       scalar_vals[depth_to_max_tensors_scalarlist_of_complex_double[0]];
-  unsigned char block_to_tensor[depth_to_max_blocks[1 - 1]];
+  uint16_t block_to_tensor[depth_to_max_blocks[1 - 1]];
   int block_to_chunk[depth_to_max_blocks[1 - 1]];
 };
 
@@ -78,7 +82,7 @@ struct TensorListScalarListMetadata<c10::complex<double>, 2> {
       numel_for_tensor[depth_to_max_tensors_scalarlist_of_complex_double[1]];
   c10::complex<double>
       scalar_vals[depth_to_max_tensors_scalarlist_of_complex_double[1]];
-  unsigned char block_to_tensor[depth_to_max_blocks[2 - 1]];
+  uint16_t block_to_tensor[depth_to_max_blocks[2 - 1]];
   int block_to_chunk[depth_to_max_blocks[2 - 1]];
 };
 
@@ -90,10 +94,13 @@ struct FusedOptimizerTensorListMetadata {
   const void* addresses[n][depth_to_max_tensors[n - 1]];
   int64_t numel_for_tensor[depth_to_max_tensors[n - 1]];
   const void* state_steps_addresses[depth_to_max_tensors_scalarlist[n - 1]];
-  unsigned char block_to_tensor[depth_to_max_blocks[n - 1]];
+  uint16_t block_to_tensor[depth_to_max_blocks[n - 1]];
   int block_to_chunk[depth_to_max_blocks[n - 1]];
   int start_tensor_this_launch;
 };
+
+// 32764 bytes: the kernel argument size limit for CUDA 12.1+.
+static constexpr int kMaxKernelArgSize = 32764;
 
 template <typename T, typename U, typename... ArgTypes>
 C10_LAUNCH_BOUNDS_1(kBlockSize)
@@ -101,6 +108,9 @@ __global__ void multi_tensor_apply_kernel(
     T tensorListMeta,
     U callable,
     ArgTypes... args) {
+  static_assert(
+      sizeof(T) <= kMaxKernelArgSize,
+      "TensorListMetadata struct exceeds CUDA kernel argument size limit");
   // Hand the chunk information to the user-supplied functor to process however
   // it likes.
   callable(kChunkSize, tensorListMeta, args...);
