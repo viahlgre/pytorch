@@ -149,6 +149,15 @@ env
 
 echo "Testing pytorch"
 
+# On k8s (ARC) pods, os.cpu_count() may return the host's CPU count rather than
+# the pod's cgroup limit. This causes PyTorch to spawn too many OMP threads per
+# process, leading to OOM when multiple test processes run in parallel (NUM_PROCS=3).
+# Use nproc (cgroup-aware) to set a sensible default if OMP_NUM_THREADS is unset.
+if [[ -z "${OMP_NUM_THREADS:-}" ]]; then
+  OMP_NUM_THREADS=$(nproc)
+  export OMP_NUM_THREADS
+fi
+
 export LANG=C.UTF-8
 
 PR_NUMBER=${PR_NUMBER:-${CIRCLE_PR_NUMBER:-}}
