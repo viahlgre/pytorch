@@ -9,6 +9,7 @@
 #include <torch/csrc/dynamo/utils.h>
 #include <torch/csrc/utils/pybind.h>
 #include <list>
+#include <unordered_map>
 
 namespace py = pybind11;
 
@@ -60,8 +61,24 @@ typedef struct VISIBILITY_HIDDEN ExtraState {
   // function.
   PyCodeObject* orig_code;
   std::list<PrecompileEntry> precompile_entries;
-  // List of cache entries for compiled code objects
+  // Default cache list for non-isolated compilations (region_id == -1).
+  // Used directly when no isolated regions exist on this code object.
   std::list<CacheEntry> cache_entry_list;
+  // Lazily allocated per-region map for isolated_region support.
+  // Only created when the first isolated region (region_id >= 0) is used.
+  // Does NOT include region -1 entries — those stay in cache_entry_list.
+  //
+  // IMPORTANT: CacheEntry::_owner_list holds raw pointers to the std::list
+  // values inside this map. The C++ standard guarantees that unordered_map
+  // insert/rehash does not invalidate pointers or references to elements,
+  // so these pointers remain valid. However, erasing a region from this map
+  // would invalidate all _owner_list pointers for that region's entries,
+  // leading to use-after-free. Do NOT erase regions for the lifetime of
+  // this ExtraState.
+  std::unique_ptr<std::unordered_map<int64_t, std::list<CacheEntry>>>
+      region_cache_map;
+  // Total cache entries across all regions (for O(1) has_any_cache_entries)
+  size_t total_cache_entry_count{0};
   // Frame state to detect dynamic shape dims
   py::dict frame_state;
   // Actions to apply to all frames with this code object
@@ -69,6 +86,8 @@ typedef struct VISIBILITY_HIDDEN ExtraState {
 
   ExtraState(PyCodeObject* orig_code_arg);
   CacheEntry* get_first_entry();
+  std::list<CacheEntry>& get_or_create_region_list(int64_t region_id);
+  bool has_any_cache_entries() const;
   void move_to_front(CacheEntry* cache_entry);
   void move_to_back(CacheEntry* cache_entry);
   void invalidate(CacheEntry* cache_entry, py::object deleted_guard_manager);
@@ -81,13 +100,14 @@ typedef struct PrecompileEntry PrecompileEntry;
 
 #endif
 
-// Helper to extra the cache_entry from the extra state.
+// Helper to extract the first cache_entry for a given region.
 // Ownership contract
 // args
 //  - extra_state: Borrowed
+//  - region_id: The region to extract from
 // return
 //  - CacheEntry: Borrowed.
-CacheEntry* extract_cache_entry(ExtraState* extra_state);
+CacheEntry* extract_cache_entry(ExtraState* extra_state, int64_t region_id);
 
 // Returns either the previously stored frame state or an empty dict.
 // Ownership contract
@@ -171,6 +191,7 @@ void lookup(
     ExtraState* extra_state,
     FrameLocalsMapping* f_locals,
     PyObject* backend,
+    int64_t region_id,
     PyObject** maybe_cached_code,
     const char** trace_annotation,
     bool is_skip_guard_eval_unsafe);
