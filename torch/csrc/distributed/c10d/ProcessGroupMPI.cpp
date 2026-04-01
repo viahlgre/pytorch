@@ -10,7 +10,7 @@
 #include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
 
 #if defined(OPEN_MPI) && OPEN_MPI
-#include <mpi-ext.h> // Needed for CUDA-aware check
+#include <mpi-ext.h> // Needed for OpenMPI CUDA-aware check
 #endif
 
 namespace c10d {
@@ -46,19 +46,34 @@ std::map<at::ScalarType, MPI_Datatype> mpiDatatype = {
     {at::kShort, MPI_SHORT},
 };
 
-// Checking CUDA-aware MPI support, currently we only support CUDA aware
-// MPI ops through Open MPI
+// Runtime check for GPU-aware MPI support.
+//
+// MPI implementation specific defines are used to check if the
+// runtime query function is expected to be available:
+//
+// - OpenMPI: MPIX_CUDA_AWARE_SUPPORT, MPIX_ROCM_AWARE_SUPPORT
+// - MPICH: MPIX_GPU_SUPPORT_CUDA, MPIX_GPU_SUPPORT_HIP
+//
+// The query function names are the same for both MPI libraries.
+//
 bool cudaAwareMpiCheck() {
-// Run time check
-#if defined(MPIX_CUDA_AWARE_SUPPORT)
-  if (MPIX_Query_cuda_support() == 1) {
-    return true;
-  } else {
+#if defined(USE_ROCM)
+
+  #if defined(MPIX_ROCM_AWARE_SUPPORT) || defined(MPIX_GPU_SUPPORT_HIP)
+    return MPIX_Query_hip_support() == 1;
+  #else
     return false;
-  }
-#else // !defined(MPIX_CUDA_AWARE_SUPPORT)
-  return false;
-#endif // MPIX_CUDA_AWARE_SUPPORT
+  #endif
+
+#else
+
+  #if defined(MPIX_CUDA_AWARE_SUPPORT) || defined(MPIX_GPU_SUPPORT_CUDA)
+    return MPIX_Query_cuda_support() == 1;
+  #else
+    return false;
+  #endif
+
+#endif
 }
 
 // Checking the input tensor's validity
