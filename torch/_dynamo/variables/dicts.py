@@ -676,16 +676,6 @@ class ConstDictVariable(VariableTracker):
             return self.clone(
                 items=self.items.copy(), mutation_type=ValueMutationNew(), source=None
             )
-        elif name == "__len__":
-            if args or kwargs:
-                raise_args_mismatch(
-                    tx,
-                    name,
-                    "0 args and 0 kwargs",
-                    f"{len(args)} args and {len(kwargs)} kwargs",
-                )
-            self.install_dict_keys_match_guard()
-            return VariableTracker.build(tx, len(self.items))
         elif name == "__setitem__" and self.is_mutable():
             arg_hashable = args and is_hashable(args[0])
             if not arg_hashable:
@@ -979,6 +969,11 @@ class ConstDictVariable(VariableTracker):
         self.install_dict_keys_match_guard()
         return [x.vt for x in self.items]
 
+    def mp_length(self, tx: "InstructionTranslator") -> VariableTracker:
+        """Mapping length for dict objects."""
+        self.install_dict_keys_match_guard()
+        return VariableTracker.build(tx, len(self.items))
+
     def call_obj_hasattr(
         self, tx: "InstructionTranslator", name: str
     ) -> ConstantVariable:
@@ -1088,6 +1083,9 @@ class MappingProxyVariable(VariableTracker):
                 ],
             )
         return self.dv_dict.call_method(tx, name, args, kwargs)
+
+    def mp_length(self, tx: "InstructionTranslator") -> VariableTracker:
+        return self.dv_dict.mp_length(tx)
 
     def call_obj_hasattr(
         self, tx: "InstructionTranslator", name: str
@@ -1832,9 +1830,7 @@ class DictViewVariable(VariableTracker):
         args: list[VariableTracker],
         kwargs: dict[str, VariableTracker],
     ) -> VariableTracker:
-        if name == "__len__":
-            return self.dv_dict.call_method(tx, name, args, kwargs)
-        elif name == "__iter__":
+        if name == "__iter__":
             from .lists import ListIteratorVariable
 
             return ListIteratorVariable(
@@ -1843,6 +1839,10 @@ class DictViewVariable(VariableTracker):
         elif name == "__repr__":
             return VariableTracker.build(tx, self.debug_repr())
         return super().call_method(tx, name, args, kwargs)
+
+    def mp_length(self, tx: "InstructionTranslator") -> VariableTracker:
+        """Mapping length for dict view objects."""
+        return self.dv_dict.mp_length(tx)
 
 
 class DictKeysVariable(DictViewVariable):
