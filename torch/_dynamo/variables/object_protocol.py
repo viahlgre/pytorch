@@ -112,6 +112,14 @@ def vt_implements_mp_length(obj: "VariableTracker") -> bool:
     return vt_implements_slot(obj, "__len__", "mp_length")
 
 
+def vt_implements_tp_iter(obj: "VariableTracker") -> bool:
+    return vt_implements_slot(obj, "__iter__", "iter_impl")
+
+
+def vt_implements_tp_iternext(obj: "VariableTracker") -> bool:
+    return vt_implements_slot(obj, "__next__", "iternext_impl")
+
+
 def vt_mapping_size(
     tx: "InstructionTranslator", obj: "VariableTracker"
 ) -> "VariableTracker":
@@ -123,10 +131,6 @@ def vt_mapping_size(
         type_error(tx, f"{obj.python_type_name()} is not a mapping")
 
     type_error(tx, f"object of type {obj.python_type_name()} has no len()")
-
-
-def vt_implements_tp_iter(obj: "VariableTracker") -> bool:
-    return vt_implements_slot(obj, "__iter__", "iter_impl")
 
 
 def vt_sequence_check(obj: "VariableTracker") -> bool:
@@ -164,6 +168,29 @@ def generic_getitem(
     return obj.getitem_impl(tx, item)
 
 
+def generic_iternext(
+    tx: "InstructionTranslator", obj: "VariableTracker"
+) -> "VariableTracker":
+    """
+    Implements PyIter_Next / tp_iternext semantics for VariableTracker objects.
+
+    Calls obj.iternext_impl(tx) if the object is an iterator, otherwise raises
+    TypeError. StopIteration propagation is left to the caller (mirrors
+    CPython's iternext contract where NULL return signals exhaustion).
+    """
+    from .base import VariableTracker
+
+    # ref: https://github.com/python/cpython/blob/v3.13.0/Objects/abstract.c#L2865
+    if not vt_implements_tp_iternext(obj):
+        msg = VariableTracker.build(
+            tx, f"'{obj.python_type_name()}' object is not an iterator"
+        )
+        raise_observed_exception(TypeError, tx, args=[msg])
+
+    return obj.iternext_impl(tx)
+
+
+# TODO(guilhermeleobas): should we narrow the return type to IteratorVariable?
 def generic_getiter(
     tx: "InstructionTranslator", obj: "VariableTracker"
 ) -> "VariableTracker":
@@ -183,7 +210,14 @@ def generic_getiter(
     # 3. Otherwise, raise a TypeError
 
     if vt_implements_tp_iter(obj):
-        return obj.iter_impl(tx)
+        res = obj.iter_impl(tx)
+        if not vt_implements_tp_iternext(res):
+            msg = VariableTracker.build(
+                tx,
+                f"{obj.python_type_name()}.__iter__() must return an iterator, not {res.python_type_name()}",
+            )
+            raise_observed_exception(TypeError, tx, args=[msg])
+        return res
     elif vt_sequence_check(obj):
         return UserFunctionVariable(polyfills.builtins.sequence_iterator).call_function(
             tx, [obj], {}
