@@ -1190,6 +1190,9 @@ class LocalGeneratorObjectVariable(VariableTracker):
             return CONSTANT_VARIABLE_TRUE
         return CONSTANT_VARIABLE_FALSE
 
+    def iter_impl(self, tx: "InstructionTranslator") -> VariableTracker:
+        return self
+
     def has_unpack_var_sequence(self, tx: "InstructionTranslator") -> bool:
         return False
 

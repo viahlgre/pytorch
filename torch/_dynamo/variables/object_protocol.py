@@ -8,9 +8,12 @@ Per-type richcompare_impl hooks live in their respective VT files.
 
 from typing import TYPE_CHECKING
 
+from .. import polyfills
+from ..exc import raise_observed_exception
 from ..utils import istype
 from .base import NO_SUCH_SUBOBJ, raise_type_error_exc, VariableTracker
 from .constant import CONSTANT_VARIABLE_FALSE, CONSTANT_VARIABLE_TRUE
+from .functions import UserFunctionVariable
 
 
 type_error = raise_type_error_exc
@@ -122,6 +125,21 @@ def vt_mapping_size(
     type_error(tx, f"object of type {obj.python_type_name()} has no len()")
 
 
+def vt_implements_tp_iter(obj: "VariableTracker") -> bool:
+    return vt_implements_slot(obj, "__iter__", "iter_impl")
+
+
+def vt_sequence_check(obj: "VariableTracker") -> bool:
+    """Implements PySequence_Check semantics for VariableTracker objects."""
+    from .dicts import ConstDictVariable
+
+    if istype(obj, ConstDictVariable):
+        return False
+
+    # needs generic_getitem to be implemented in Dynamo
+    return True
+
+
 def generic_len(
     tx: "InstructionTranslator", obj: "VariableTracker"
 ) -> "VariableTracker":
@@ -134,3 +152,48 @@ def generic_len(
     if vt_implements_sq_length(obj):
         return obj.sq_length(tx)
     return vt_mapping_size(tx, obj)
+
+
+def generic_getitem(
+    tx: "InstructionTranslator", obj: "VariableTracker", item: "VariableTracker"
+) -> "VariableTracker":
+    """
+    Implements PyObject_GetItem semantics for VariableTracker objects.
+    Routes to obj.getitem_impl(tx, item)
+    """
+    return obj.getitem_impl(tx, item)
+
+
+def generic_getiter(
+    tx: "InstructionTranslator", obj: "VariableTracker"
+) -> "VariableTracker":
+    """
+    Implements PyObject_GetIter semantics for VariableTracker objects.
+    Routes to obj.iter_impl(tx), the tp_iter slot on the object's type.
+    """
+    from .base import VariableTracker
+
+    # ref: https://github.com/python/cpython/blob/v3.13.0/Objects/abstract.c#2848
+    # The algorithm for PyObject_GetIter is as follows: Steps:
+    # 1. If the object has tp_iter slot, call it and return the result The
+    #    return object must be an iterator (it must have a tp_iternext slot)
+    # 2. If the object implements the sequence protocol - implements __getitem__
+    #    and __len__, then create a sequence iterator for the object and return
+    #    it.
+    # 3. Otherwise, raise a TypeError
+
+    if vt_implements_tp_iter(obj):
+        return obj.iter_impl(tx)
+    elif vt_sequence_check(obj):
+        return UserFunctionVariable(polyfills.builtins.sequence_iterator).call_function(
+            tx, [obj], {}
+        )
+    else:
+        msg = VariableTracker.build(
+            tx, f"'{obj.python_type_name()}' object is not iterable"
+        )
+        raise_observed_exception(
+            TypeError,
+            tx,
+            args=[msg],
+        )
