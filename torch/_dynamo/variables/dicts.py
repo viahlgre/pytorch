@@ -600,6 +600,15 @@ class ConstDictVariable(VariableTracker):
             else:
                 self.install_dict_keys_match_guard()
 
+    def contains_impl(
+        self, tx: "InstructionTranslator", item: VariableTracker
+    ) -> VariableTracker:
+        if not is_hashable(item):
+            raise_unhashable(item, tx)
+        self.install_dict_contains_guard(tx, [item])
+        contains = item in self
+        return VariableTracker.build(tx, contains)
+
     def iter_impl(self, tx: "InstructionTranslator") -> VariableTracker:
         from .iter import DictIterator
 
@@ -818,22 +827,6 @@ class ConstDictVariable(VariableTracker):
                 return CONSTANT_VARIABLE_NONE
             else:
                 return super().call_method(tx, name, args, kwargs)
-        elif name == "__contains__":
-            if not len(args):
-                raise_args_mismatch(
-                    tx,
-                    name,
-                    "more than 1 args and 0 kwargs",
-                    f"{len(args)} args and {len(kwargs)} kwargs",
-                )
-
-            arg_hashable = args and is_hashable(args[0])
-            if not arg_hashable:
-                raise_unhashable(args[0], tx)
-
-            self.install_dict_contains_guard(tx, args)
-            contains = args[0] in self
-            return VariableTracker.build(tx, contains)
         elif name == "setdefault" and self.is_mutable():
             if len(args) not in (1, 2):
                 raise_args_mismatch(
@@ -1535,6 +1528,18 @@ class SetVariable(ConstDictVariable):
             )
         return super().call_method(tx, name, args, kwargs)
 
+    def contains_impl(
+        self, tx: "InstructionTranslator", item: VariableTracker
+    ) -> VariableTracker:
+        # https://github.com/python/cpython/blob/8e9d21c64b65edda99a0d38e8d23545b17f8455e/Objects/setobject.c#L2501-L2520
+        # Unlike most container types, set allows membership testing with a set
+        # key, even though it is not hashable.
+        # if isinstance(item, SetVariable) and self.python_type() is set:
+        if isinstance(item, SetVariable) and item.python_type() is set:
+            frozenset_item = variables.FrozensetVariable(item.items)
+            return super().contains_impl(tx, frozenset_item)
+        return super().contains_impl(tx, item)
+
     def python_type_var(self) -> "BuiltinVariable":
         return variables.BuiltinVariable(set)
 
@@ -1857,6 +1862,11 @@ class DictViewVariable(VariableTracker):
 class DictKeysVariable(DictViewVariable):
     kv = "keys"
 
+    def contains_impl(
+        self, tx: "InstructionTranslator", item: VariableTracker
+    ) -> VariableTracker:
+        return self.dv_dict.contains_impl(tx, item)
+
     @property
     def set_items(self) -> set[VariableTracker]:
         return set(self.view_items)
@@ -1888,9 +1898,7 @@ class DictKeysVariable(DictViewVariable):
         args: list[VariableTracker],
         kwargs: dict[str, VariableTracker],
     ) -> VariableTracker:
-        if name == "__contains__":
-            return self.dv_dict.call_method(tx, name, args, kwargs)
-        elif name in (
+        if name in (
             "__and__",
             "__iand__",
             "__or__",
