@@ -294,6 +294,16 @@ class _HookMixin:
         return backward_hooks, handle
 
 
+class _BoxedGradsList(list):
+    """Marker type for grads boxed by the autograd engine in PyNode::apply.
+
+    The autograd engine creates a _BoxedGradsList (instead of a plain list)
+    when boxing grads for boxed_grads_call=True. BackwardCFunction.apply
+    checks for this type to avoid double-boxing — a plain list from user
+    code is never a _BoxedGradsList, so there is no ambiguity.
+    """
+
+
 class BackwardCFunction(_C._FunctionBase, FunctionCtx, _HookMixin):
     r"""
     This class is used for internal autograd work. Do not use.
@@ -314,6 +324,15 @@ class BackwardCFunction(_C._FunctionBase, FunctionCtx, _HookMixin):
                 "of them."
             )
         user_fn = vjp_fn if vjp_fn is not Function.vjp else backward_fn
+        # When boxed_grads_call is True, backward expects grads as a single
+        # mutable list. The C++ engine path (PyNode::apply) already boxes
+        # grads into a _BoxedGradsList before calling apply. The direct
+        # .apply() path (e.g. grad_fn.apply(None, tensor)) does not go
+        # through C++, so we box here.
+        fwd_cls = self._forward_cls  # type: ignore[attr-defined]  # pyrefly: ignore[missing-attribute]
+        if getattr(fwd_cls, "boxed_grads_call", False):
+            if not (len(args) == 1 and isinstance(args[0], _BoxedGradsList)):
+                args = (list(args),)
         return user_fn(self, *args)
 
     def apply_jvp(self, *args):
@@ -457,6 +476,19 @@ class _SingleLevelFunction(
     Default is False.
     """
     clear_saved_tensors_on_access = False
+
+    """
+    Bool that specifies if backward should receive grads as a single mutable
+    list argument instead of individual args in an immutable tuple. This allows
+    backward to free individual grads mid-execution by removing them from the
+    list, reducing peak memory.
+
+    When True, ``backward(ctx, grads)`` receives a single list instead of
+    ``backward(ctx, *grads)``.
+
+    Default is False.
+    """
+    boxed_grads_call = False
 
     @staticmethod
     def jvp(ctx: Any, *grad_inputs: Any) -> Any:
